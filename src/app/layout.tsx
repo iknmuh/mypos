@@ -1,54 +1,35 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono, Parkinsans } from "next/font/google";
+import "@/app/globals.css";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { ClerkProvider } from "@clerk/nextjs";
-import { ThemeProvider } from "@/components/theme-provider";
-import "./globals.css";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-const parkinsans = Parkinsans({
-  variable: "--font-parkinsans",
-  subsets: ["latin"],
-  weight: ["300", "400", "500", "600", "700", "800"],
-  fallback: ["system-ui", "sans-serif"],
-  adjustFontFallback: false,
-});
 
 export const metadata: Metadata = {
-  title: "CodeGuide Starter Kit",
-  description:
-    "A modern Next.js starter with TypeScript, TailwindCSS, shadcn/ui, Vercel AI SDK, Clerk, and Supabase",
+    title: "MyPOS — Kelola Bisnis Mudah",
+    description:
+        "Aplikasi kasir & manajemen bisnis untuk UMKM Indonesia. Penjualan, stok, hutang/piutang, laporan, dan AI assistant dalam satu platform.",
+    keywords: ["POS", "kasir", "UMKM", "stok", "penjualan", "Indonesia"],
 };
 
 export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
-  return (
-    <ClerkProvider>
-      <html lang="en" suppressHydrationWarning>
-        <body
-          className={`${geistSans.className} ${geistMono.className} ${parkinsans.className} antialiased`}
-        >
-          <ThemeProvider
-            attribute="class"
-            defaultTheme="system"
-            enableSystem
-            disableTransitionOnChange
-          >
-            {children}
-          </ThemeProvider>
-        </body>
-      </html>
-    </ClerkProvider>
-  );
+    children,
+}: {
+    children: React.ReactNode;
+}) {
+    return (
+        <ClerkProvider appearance={{ cssLayerName: "clerk" }}>
+            <html lang="id" suppressHydrationWarning>
+                <head>
+                    <link rel="preconnect" href="https://fonts.googleapis.com" />
+                    <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+                    <link
+                        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+                        rel="stylesheet"
+                    />
+                </head>
+                <body className="min-h-screen font-sans">
+                    <TooltipProvider delayDuration={0}>{children}</TooltipProvider>
+                </body>
+            </html>
+        </ClerkProvider>
+    );
 }
