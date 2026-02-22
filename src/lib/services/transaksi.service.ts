@@ -31,17 +31,17 @@ export async function processSaleAtomic(
 
     const { data, error } = await supabaseAdmin.rpc("process_sale", {
         p_store_id: storeId,
-        p_pelanggan_id: input.pelanggan_id ?? null,
-        p_pelanggan: input.pelanggan ?? null,
+        p_items: itemsJson,
         p_total: input.total,
-        p_diskon: input.diskon,
-        p_pajak: input.pajak,
         p_grand_total: input.grand_total,
         p_bayar: input.bayar,
+        p_pelanggan_id: input.pelanggan_id ?? null,
+        p_pelanggan: input.pelanggan ?? null,
+        p_diskon: input.diskon,
+        p_pajak: input.pajak,
         p_kembalian: input.kembalian,
         p_metode: input.metode,
         p_catatan: input.catatan ?? null,
-        p_items: itemsJson,
     });
 
     if (error) {

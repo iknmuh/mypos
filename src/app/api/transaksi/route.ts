@@ -1,128 +1,120 @@
 import { NextRequest, NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabase";
 import { apiRoute, getStoreId } from "@/lib/api";
-import { successResponse } from "@/lib/errors";
-import { CreateTransaksiSchema, TransaksiQuerySchema } from "@/lib/validations/transaksi";
-import { processSaleAtomic, getTransaksiList } from "@/lib/services/transaksi.service";
-import { AuditService, AuditTables, extractRequestMetadata } from "@/lib/audit";
-import { CacheService, CacheKeys, CacheTTL, CacheInvalidation } from "@/lib/cache";
-import { checkRateLimit } from "@/lib/rate-limit";
-import { ValidationError } from "@/lib/errors";
 
 /**
- * GET /api/transaksi - Get transaction list with pagination
+ * GET /api/transaksi - Get transaction list
+ * Returns plain array for frontend compatibility
  */
 export async function GET(req: NextRequest) {
     return apiRoute(async () => {
-        // Check rate limit
-        const rateLimitResponse = await checkRateLimit(req);
-        if (rateLimitResponse) return rateLimitResponse;
-
         const storeId = await getStoreId();
         const { searchParams } = req.nextUrl;
 
-        // Parse and validate query parameters
-        const queryResult = TransaksiQuerySchema.safeParse({
-            from: searchParams.get("from") ?? undefined,
-            to: searchParams.get("to") ?? undefined,
-            status: searchParams.get("status") ?? undefined,
-            page: searchParams.get("page") ?? "1",
-            limit: searchParams.get("limit") ?? "50",
-        });
+        const from = searchParams.get("from");
+        const to = searchParams.get("to");
+        const status = searchParams.get("status");
 
-        if (!queryResult.success) {
-            throw new ValidationError("Parameter query tidak valid", {
-                errors: queryResult.error.issues
-            });
+        let query = supabaseAdmin
+            .from("transaksi")
+            .select("*, transaksi_item(*)")
+            .eq("store_id", storeId)
+            .order("created_at", { ascending: false });
+
+        if (from) query = query.gte("created_at", from);
+        if (to) query = query.lte("created_at", to + "T23:59:59");
+        if (status) query = query.eq("status", status);
+
+        query = query.limit(100);
+
+        const { data, error } = await query;
+
+        if (error) {
+            return NextResponse.json({ error: error.message }, { status: 500 });
         }
 
-        const query = queryResult.data;
-
-        // Try cache first for first page
-        if (query.page === 1 && !query.from && !query.to && !query.status) {
-            const cacheKey = CacheKeys.transactions(storeId, 1);
-            const cached = await CacheService.get(cacheKey);
-            if (cached) {
-                return NextResponse.json(cached);
-            }
-        }
-
-        // Fetch from database
-        const result = await getTransaksiList(storeId, {
-            from: query.from,
-            to: query.to,
-            status: query.status,
-            page: query.page,
-            limit: query.limit,
-        });
-
-        // Cache first page results
-        if (query.page === 1 && !query.from && !query.to && !query.status) {
-            await CacheService.set(
-                CacheKeys.transactions(storeId, 1),
-                result,
-                CacheTTL.SHORT
-            );
-        }
-
-        return NextResponse.json(result);
+        return NextResponse.json(data ?? []);
     });
 }
 
 /**
  * POST /api/transaksi - Create a new transaction
+ * Expects: { items, pelanggan, total, diskon, pajak, grand_total, bayar, kembalian, metode, catatan }
  */
 export async function POST(req: NextRequest) {
     return apiRoute(async () => {
-        // Check rate limit for write operations
-        const rateLimitResponse = await checkRateLimit(req);
-        if (rateLimitResponse) return rateLimitResponse;
-
         const storeId = await getStoreId();
         const body = await req.json();
 
-        // Validate input
-        const validationResult = CreateTransaksiSchema.safeParse(body);
-        if (!validationResult.success) {
-            throw new ValidationError("Data transaksi tidak valid", {
-                errors: validationResult.error.issues,
-            });
+        if (!body.items || !Array.isArray(body.items) || body.items.length === 0) {
+            return NextResponse.json({ error: "Keranjang tidak boleh kosong" }, { status: 400 });
         }
 
-        const input = validationResult.data;
+        // Generate invoice number
+        const now = new Date();
+        const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
+        const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+        const invoiceNo = `INV-${dateStr}-${randomSuffix}`;
 
-        // Validate item subtotals
-        const subtotalValidation = input.items.every(item => {
-            const expected = (item.harga * item.jumlah) - item.diskon;
-            return item.subtotal === expected;
-        });
+        // Insert transaction header
+        const { data: transaksi, error: trxError } = await supabaseAdmin
+            .from("transaksi")
+            .insert({
+                store_id: storeId,
+                nomor: invoiceNo,
+                pelanggan: body.pelanggan || null,
+                pelanggan_id: body.pelanggan_id || null,
+                total: body.total ?? 0,
+                diskon: body.diskon ?? 0,
+                pajak: body.pajak ?? 0,
+                grand_total: body.grand_total ?? 0,
+                bayar: body.bayar ?? 0,
+                kembalian: body.kembalian ?? 0,
+                metode: body.metode ?? "Tunai",
+                catatan: body.catatan || null,
+                status: "selesai",
+            })
+            .select()
+            .single();
 
-        if (!subtotalValidation) {
-            throw new ValidationError("Subtotal item tidak sesuai");
+        if (trxError) {
+            return NextResponse.json({ error: trxError.message }, { status: 400 });
         }
 
-        // Process transaction atomically
-        const result = await processSaleAtomic(storeId, input);
+        // Insert items
+        const items = body.items.map((item: { produk_id: string; nama: string; harga: number; jumlah: number; diskon?: number; subtotal: number }) => ({
+            transaksi_id: transaksi.id,
+            store_id: storeId,
+            produk_id: item.produk_id,
+            nama: item.nama,
+            harga: item.harga,
+            jumlah: item.jumlah,
+            diskon: item.diskon ?? 0,
+            subtotal: item.subtotal,
+        }));
 
-        // Invalidate relevant caches
-        await CacheInvalidation.transaction(storeId, result.invoice_id);
+        await supabaseAdmin.from("transaksi_item").insert(items);
 
-        // Log audit trail
-        const metadata = extractRequestMetadata(req);
-        await AuditService.logCreate(
-            AuditTables.TRANSAKSI,
-            result.invoice_id,
-            {
-                invoice_no: result.invoice_no,
-                grand_total: input.grand_total,
-                metode: input.metode,
-                items_count: input.items.length,
+        // Update stock for each item
+        for (const item of body.items) {
+            const { data: prod } = await supabaseAdmin
+                .from("produk")
+                .select("stok")
+                .eq("id", item.produk_id)
+                .single();
+
+            if (prod) {
+                await supabaseAdmin
+                    .from("produk")
+                    .update({ stok: prod.stok - item.jumlah })
+                    .eq("id", item.produk_id);
             }
-        );
+        }
 
-        return successResponse({
-            id: result.invoice_id,
-            nomor: result.invoice_no,
-            total_items: result.total_items,
-        }, 201);
+        return NextResponse.json({
+            id: transaksi.id,
+            nomor: transaksi.nomor,
+            grand_total: transaksi.grand_total,
+        }, { status: 201 });
     });
 }

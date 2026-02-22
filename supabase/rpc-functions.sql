@@ -13,17 +13,17 @@ CREATE SEQUENCE IF NOT EXISTS invoice_seq START 1;
 -- ============================================================
 CREATE OR REPLACE FUNCTION process_sale(
     p_store_id text,
-    p_pelanggan_id uuid DEFAULT NULL,
-    p_pelanggan text DEFAULT NULL,
+    p_items jsonb,
     p_total bigint,
-    p_diskon bigint DEFAULT 0,
-    p_pajak bigint DEFAULT 0,
     p_grand_total bigint,
     p_bayar bigint,
+    p_pelanggan_id uuid DEFAULT NULL,
+    p_pelanggan text DEFAULT NULL,
+    p_diskon bigint DEFAULT 0,
+    p_pajak bigint DEFAULT 0,
     p_kembalian bigint DEFAULT 0,
     p_metode text DEFAULT 'Tunai',
-    p_catatan text DEFAULT NULL,
-    p_items jsonb
+    p_catatan text DEFAULT NULL
 ) RETURNS jsonb
 LANGUAGE plpgsql
 AS $$
@@ -221,6 +221,7 @@ DECLARE
     v_current_stok integer;
     v_new_stok integer;
     v_produk_nama text;
+    v_adjustment_id uuid;
 BEGIN
     -- Validate tipe
     IF p_tipe NOT IN ('masuk', 'keluar', 'koreksi') THEN
@@ -266,7 +267,7 @@ BEGIN
         store_id, produk_id, tipe, jumlah, stok_akhir, catatan
     ) VALUES (
         p_store_id, p_produk_id, p_tipe, p_jumlah, v_new_stok, p_catatan
-    ) RETURNING id INTO v_current_stok; -- Reuse variable for adjustment_id
+    ) RETURNING id INTO v_adjustment_id;
     
     -- Return result
     RETURN jsonb_build_object(
@@ -275,7 +276,7 @@ BEGIN
         'produk_nama', v_produk_nama,
         'previous_stok', v_current_stok,
         'new_stok', v_new_stok,
-        'adjustment_id', v_current_stok
+        'adjustment_id', v_adjustment_id
     );
 END;
 $$;

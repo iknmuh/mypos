@@ -11,12 +11,13 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { formatCurrency, formatNumber, formatDateShort } from "@/lib/utils";
-import { Plus, Package, Pencil, Trash2, Eye, Loader2 } from "lucide-react";
+import { Plus, Package, Pencil, Trash2, Eye, Loader2, Tags, FolderOpen } from "lucide-react";
 
+// ── Types ─────────────────────────────────────────────────────
 interface Product {
     id: string;
     nama: string;
@@ -32,9 +33,53 @@ interface Product {
     [key: string]: unknown;
 }
 
+interface Kategori {
+    id: string;
+    nama: string;
+    created_at: string;
+    [key: string]: unknown;
+}
+
 const units = ["Pcs", "Pack", "Botol", "Karung", "Kotak", "Renceng", "Lusin", "Kg", "Liter"];
 
+// ══════════════════════════════════════════════════════════════
+// MAIN PAGE
+// ══════════════════════════════════════════════════════════════
 export default function BarangStokPage() {
+    const [activeTab, setActiveTab] = useState("produk");
+
+    return (
+        <div className="space-y-6">
+            <PageHeader
+                title="Barang & Stok"
+                description="Kelola produk, stok, dan kategori produk"
+            />
+
+            <Tabs value={activeTab} onValueChange={setActiveTab}>
+                <TabsList>
+                    <TabsTrigger value="produk" className="gap-2">
+                        <Package className="h-4 w-4" /> Produk
+                    </TabsTrigger>
+                    <TabsTrigger value="kategori" className="gap-2">
+                        <Tags className="h-4 w-4" /> Kategori
+                    </TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="produk" className="mt-6">
+                    <ProdukTab />
+                </TabsContent>
+                <TabsContent value="kategori" className="mt-6">
+                    <KategoriTab />
+                </TabsContent>
+            </Tabs>
+        </div>
+    );
+}
+
+// ══════════════════════════════════════════════════════════════
+// PRODUK TAB  (original page logic)
+// ══════════════════════════════════════════════════════════════
+function ProdukTab() {
     const [products, setProducts] = useState<Product[]>([]);
     const [categories, setCategories] = useState<string[]>([]);
     const [loading, setLoading] = useState(true);
@@ -45,7 +90,6 @@ export default function BarangStokPage() {
     const [editMode, setEditMode] = useState(false);
     const [saving, setSaving] = useState(false);
 
-    // Form state
     const [form, setForm] = useState({
         nama: "", kode: "", kategori: "", harga_beli: 0, harga_jual: 0,
         stok: 0, stok_minimum: 0, satuan: "Pcs",
@@ -137,7 +181,9 @@ export default function BarangStokPage() {
 
     return (
         <div className="space-y-6">
-            <PageHeader title="Barang & Stok" description="Kelola produk dan pantau ketersediaan stok" action={{ label: "Tambah Produk", icon: Plus, onClick: openAdd }} />
+            <div className="flex justify-end">
+                <Button onClick={openAdd} className="gap-2"><Plus className="h-4 w-4" /> Tambah Produk</Button>
+            </div>
 
             <div className="grid gap-4 sm:grid-cols-3">
                 <Card><CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Total Produk</CardTitle></CardHeader><CardContent><p className="text-2xl font-bold">{products.length}</p></CardContent></Card>
@@ -227,6 +273,136 @@ export default function BarangStokPage() {
             </Sheet>
 
             <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Hapus Produk?" description={`Produk "${selectedProduct?.nama}" akan dihapus permanen. Tindakan ini tidak bisa dibatalkan.`} confirmLabel="Ya, Hapus" onConfirm={handleDelete} />
+        </div>
+    );
+}
+
+// ══════════════════════════════════════════════════════════════
+// KATEGORI TAB  (new)
+// ══════════════════════════════════════════════════════════════
+function KategoriTab() {
+    const [categories, setCategories] = useState<Kategori[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [formOpen, setFormOpen] = useState(false);
+    const [deleteOpen, setDeleteOpen] = useState(false);
+    const [selected, setSelected] = useState<Kategori | null>(null);
+    const [editMode, setEditMode] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [nama, setNama] = useState("");
+
+    const fetchCategories = useCallback(async () => {
+        setLoading(true);
+        try {
+            const res = await fetch("/api/kategori");
+            const data = await res.json();
+            setCategories(Array.isArray(data) ? data : []);
+        } catch (e) { console.error("Fetch error:", e); }
+        setLoading(false);
+    }, []);
+
+    useEffect(() => { fetchCategories(); }, [fetchCategories]);
+
+    const openAdd = () => { setSelected(null); setEditMode(false); setNama(""); setFormOpen(true); };
+    const openEdit = (k: Kategori) => { setSelected(k); setEditMode(true); setNama(k.nama); setFormOpen(true); };
+    const openDelete = (k: Kategori) => { setSelected(k); setDeleteOpen(true); };
+
+    const handleSave = async () => {
+        if (!nama.trim()) { alert("Nama kategori wajib diisi"); return; }
+        setSaving(true);
+        try {
+            const method = editMode ? "PUT" : "POST";
+            const body = editMode ? { id: selected?.id, nama: nama.trim() } : { nama: nama.trim() };
+            const res = await fetch("/api/kategori", { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            if (!res.ok) { const err = await res.json(); throw new Error(err.error ?? "Gagal menyimpan"); }
+            setFormOpen(false);
+            fetchCategories();
+        } catch (e) { alert((e as Error).message); }
+        setSaving(false);
+    };
+
+    const handleDelete = async () => {
+        if (!selected) return;
+        try {
+            const res = await fetch("/api/kategori", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: selected.id }) });
+            if (!res.ok) { const err = await res.json(); throw new Error(err.error ?? "Gagal menghapus"); }
+            fetchCategories();
+        } catch (e) { alert((e as Error).message); }
+    };
+
+    const columns: Column<Kategori>[] = [
+        {
+            key: "nama", label: "Nama Kategori", render: (item) => (
+                <div className="flex items-center gap-2">
+                    <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-medium">{item.nama}</span>
+                </div>
+            )
+        },
+        { key: "created_at", label: "Tanggal Dibuat", render: (item) => formatDateShort(item.created_at) },
+        {
+            key: "actions", label: "Aksi", render: (item) => (
+                <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(item)}><Pencil className="h-4 w-4" /></Button>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => openDelete(item)}><Trash2 className="h-4 w-4" /></Button>
+                </div>
+            )
+        },
+    ];
+
+    if (loading) return <div className="flex items-center justify-center h-64"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>;
+
+    return (
+        <div className="space-y-6">
+            <div className="flex justify-end">
+                <Button onClick={openAdd} className="gap-2"><Plus className="h-4 w-4" /> Tambah Kategori</Button>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+                <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2"><Tags className="h-4 w-4" /> Total Kategori</CardTitle></CardHeader>
+                    <CardContent><p className="text-2xl font-bold">{categories.length}</p></CardContent>
+                </Card>
+            </div>
+
+            <DataTable columns={columns} data={categories} searchPlaceholder="Cari kategori..." />
+
+            {/* Add/Edit Category Dialog */}
+            <Dialog open={formOpen} onOpenChange={setFormOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>{editMode ? "Edit Kategori" : "Tambah Kategori Baru"}</DialogTitle>
+                        <DialogDescription>{editMode ? "Ubah nama kategori" : "Masukkan nama kategori produk baru"}</DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-4 py-4">
+                        <div className="grid gap-2">
+                            <Label>Nama Kategori *</Label>
+                            <Input
+                                value={nama}
+                                onChange={e => setNama(e.target.value)}
+                                placeholder="Contoh: Makanan, Minuman, Elektronik"
+                                onKeyDown={e => { if (e.key === "Enter") handleSave(); }}
+                                autoFocus
+                            />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setFormOpen(false)}>Batal</Button>
+                        <Button onClick={handleSave} disabled={saving}>
+                            {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                            {editMode ? "Simpan" : "Tambah"}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <ConfirmDialog
+                open={deleteOpen}
+                onOpenChange={setDeleteOpen}
+                title="Hapus Kategori?"
+                description={`Kategori "${selected?.nama}" akan dihapus. Produk yang menggunakan kategori ini tidak akan terhapus, hanya referensi kategorinya yang dihilangkan.`}
+                confirmLabel="Ya, Hapus"
+                onConfirm={handleDelete}
+            />
         </div>
     );
 }

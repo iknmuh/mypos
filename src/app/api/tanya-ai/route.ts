@@ -1,12 +1,12 @@
 import { NextRequest } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getStoreId, apiRoute } from "@/lib/api";
+import { getStoreId } from "@/lib/api";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 export async function POST(req: NextRequest) {
-    return apiRoute(async () => {
+    try {
         const storeId = await getStoreId();
         const { message, history } = await req.json();
 
@@ -93,5 +93,11 @@ Berikan analisis, saran, dan insight yang berguna berdasarkan data di atas.`;
                 Connection: "keep-alive",
             },
         });
-    });
+    } catch (e) {
+        console.error("[Tanya AI Error]", e);
+        return new Response(JSON.stringify({ error: "Gagal memproses permintaan AI" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+        });
+    }
 }

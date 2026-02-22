@@ -1,80 +1,48 @@
 import { NextRequest, NextResponse } from "next/server";
-import { apiRoute, getStoreId } from "@/lib/api";
-import { successResponse } from "@/lib/errors";
-import { CreateProdukSchema, ProdukQuerySchema } from "@/lib/validations/produk";
-import {
-    getProdukList,
-    createProduk,
-    getLowStockProducts
-} from "@/lib/services/produk.service";
-import { AuditService, AuditTables } from "@/lib/audit";
-import { CacheService, CacheKeys, CacheTTL, CacheInvalidation } from "@/lib/cache";
-import { checkRateLimit } from "@/lib/rate-limit";
-import { ValidationError } from "@/lib/errors";
+import { supabaseAdmin } from "@/lib/supabase";
+import { getStoreId, apiRoute } from "@/lib/api";
 
 /**
- * GET /api/produk - Get product list with pagination
+ * GET /api/produk - Get product list
+ * Returns plain array for frontend compatibility
  */
 export async function GET(req: NextRequest) {
     return apiRoute(async () => {
-        // Check rate limit
-        const rateLimitResponse = await checkRateLimit(req);
-        if (rateLimitResponse) return rateLimitResponse;
-
         const storeId = await getStoreId();
         const { searchParams } = req.nextUrl;
 
-        // Check for low stock request
+        const search = searchParams.get("search") ?? undefined;
+        const kategori = searchParams.get("kategori") ?? undefined;
+        const aktif = searchParams.get("aktif");
         const lowStock = searchParams.get("low_stock");
+
+        let query = supabaseAdmin
+            .from("produk")
+            .select("*")
+            .eq("store_id", storeId);
+
+        if (search) {
+            query = query.or(`nama.ilike.%${search}%,kode.ilike.%${search}%`);
+        }
+        if (kategori) {
+            query = query.eq("kategori", kategori);
+        }
+        if (aktif !== null && aktif !== undefined) {
+            query = query.eq("aktif", aktif === "true");
+        }
+
+        query = query.order("nama");
+
+        const { data, error } = await query;
+
+        if (error) {
+            return NextResponse.json({ error: error.message }, { status: 500 });
+        }
+
+        // Filter low stock client-side if requested
+        let result = data ?? [];
         if (lowStock === "true") {
-            const products = await getLowStockProducts(storeId);
-            return successResponse(products);
-        }
-
-        // Parse and validate query parameters
-        const queryResult = ProdukQuerySchema.safeParse({
-            search: searchParams.get("search") ?? undefined,
-            kategori: searchParams.get("kategori") ?? undefined,
-            kategori_id: searchParams.get("kategori_id") ?? undefined,
-            aktif: searchParams.get("aktif") ?? undefined,
-            page: searchParams.get("page") ?? "1",
-            limit: searchParams.get("limit") ?? "50",
-        });
-
-        if (!queryResult.success) {
-            throw new ValidationError("Parameter query tidak valid", {
-                errors: queryResult.error.issues,
-            });
-        }
-
-        const query = queryResult.data;
-
-        // Try cache for first page without filters
-        if (query.page === 1 && !query.search && !query.kategori && !query.kategori_id) {
-            const cacheKey = CacheKeys.products(storeId);
-            const cached = await CacheService.get(cacheKey);
-            if (cached) {
-                return NextResponse.json(cached);
-            }
-        }
-
-        // Fetch from database
-        const result = await getProdukList(storeId, {
-            search: query.search,
-            kategori: query.kategori,
-            kategori_id: query.kategori_id,
-            aktif: query.aktif,
-            page: query.page,
-            limit: query.limit,
-        });
-
-        // Cache first page results
-        if (query.page === 1 && !query.search && !query.kategori && !query.kategori_id) {
-            await CacheService.set(
-                CacheKeys.products(storeId),
-                result,
-                CacheTTL.MEDIUM
-            );
+            result = result.filter((p: { stok: number; stok_minimum: number }) => p.stok <= p.stok_minimum);
         }
 
         return NextResponse.json(result);
@@ -86,41 +54,33 @@ export async function GET(req: NextRequest) {
  */
 export async function POST(req: NextRequest) {
     return apiRoute(async () => {
-        // Check rate limit
-        const rateLimitResponse = await checkRateLimit(req);
-        if (rateLimitResponse) return rateLimitResponse;
-
         const storeId = await getStoreId();
         const body = await req.json();
 
-        // Validate input
-        const validationResult = CreateProdukSchema.safeParse(body);
-        if (!validationResult.success) {
-            throw new ValidationError("Data produk tidak valid", {
-                errors: validationResult.error.issues,
-            });
+        if (!body.nama || typeof body.nama !== "string" || body.nama.trim().length === 0) {
+            return NextResponse.json({ error: "Nama produk wajib diisi" }, { status: 400 });
         }
 
-        const input = validationResult.data;
+        const { data, error } = await supabaseAdmin
+            .from("produk")
+            .insert({
+                store_id: storeId,
+                kode: body.kode || null,
+                nama: body.nama.trim(),
+                kategori: body.kategori || null,
+                satuan: body.satuan || "Pcs",
+                harga_beli: Number(body.harga_beli) || 0,
+                harga_jual: Number(body.harga_jual) || 0,
+                stok: Number(body.stok) || 0,
+                stok_minimum: Number(body.stok_minimum) || 0,
+            })
+            .select()
+            .single();
 
-        // Create product
-        const product = await createProduk(storeId, input);
+        if (error) {
+            return NextResponse.json({ error: error.message }, { status: 400 });
+        }
 
-        // Invalidate cache
-        await CacheInvalidation.product(storeId, product.id);
-
-        // Log audit trail
-        await AuditService.logCreate(
-            AuditTables.PRODUK,
-            product.id,
-            {
-                nama: product.nama,
-                kode: product.kode,
-                harga_jual: product.harga_jual,
-                stok: product.stok,
-            }
-        );
-
-        return successResponse(product, 201);
+        return NextResponse.json(data, { status: 201 });
     });
 }

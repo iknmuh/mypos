@@ -1,144 +1,126 @@
 import { NextRequest, NextResponse } from "next/server";
-import { apiRouteWithParams, getStoreId } from "@/lib/api";
-import { successResponse } from "@/lib/errors";
-import { UpdateTransaksiSchema } from "@/lib/validations/transaksi";
-import { getTransaksiById, voidTransactionAtomic } from "@/lib/services/transaksi.service";
-import { AuditService, AuditTables, extractRequestMetadata } from "@/lib/audit";
-import { CacheInvalidation } from "@/lib/cache";
-import { checkRateLimit } from "@/lib/rate-limit";
-import { ValidationError, NotFoundError } from "@/lib/errors";
+import { supabaseAdmin } from "@/lib/supabase";
+import { getStoreId, apiRouteWithParams } from "@/lib/api";
 
 type Params = { id: string };
 
 /**
- * GET /api/transaksi/[id] - Get transaction by ID
+ * GET /api/transaksi/[id] - Get transaction by ID with items
  */
 export async function GET(
     req: NextRequest,
     context: { params: Promise<Params> }
 ) {
-    return apiRouteWithParams(async (req, params) => {
-        // Check rate limit
-        const rateLimitResponse = await checkRateLimit(req);
-        if (rateLimitResponse) return rateLimitResponse;
-
+    return apiRouteWithParams(async (_req, params) => {
         const storeId = await getStoreId();
         const { id } = params;
 
-        const transaksi = await getTransaksiById(id, storeId);
+        const { data, error } = await supabaseAdmin
+            .from("transaksi")
+            .select("*, transaksi_item(*)")
+            .eq("id", id)
+            .eq("store_id", storeId)
+            .single();
 
-        return successResponse(transaksi);
+        if (error) {
+            return NextResponse.json({ error: "Transaksi tidak ditemukan" }, { status: 404 });
+        }
+
+        return NextResponse.json(data);
     })(req, context);
 }
 
 /**
- * PATCH /api/transaksi/[id] - Update transaction (mainly for voiding)
+ * PATCH /api/transaksi/[id] - Update transaction status (void)
  */
 export async function PATCH(
     req: NextRequest,
     context: { params: Promise<Params> }
 ) {
     return apiRouteWithParams(async (req, params) => {
-        // Check rate limit
-        const rateLimitResponse = await checkRateLimit(req);
-        if (rateLimitResponse) return rateLimitResponse;
-
         const storeId = await getStoreId();
         const { id } = params;
         const body = await req.json();
 
-        // Validate input
-        const validationResult = UpdateTransaksiSchema.safeParse(body);
-        if (!validationResult.success) {
-            throw new ValidationError("Data tidak valid", {
-                errors: validationResult.error.issues,
-            });
-        }
+        if (body.status === "dibatalkan") {
+            // Get current transaction to check status
+            const { data: current } = await supabaseAdmin
+                .from("transaksi")
+                .select("status, nomor")
+                .eq("id", id)
+                .eq("store_id", storeId)
+                .single();
 
-        const { status } = validationResult.data;
-
-        // Only allow voiding transactions
-        if (status === "dibatalkan") {
-            // Get current transaction for audit log
-            const currentTransaksi = await getTransaksiById(id, storeId);
-
-            if (currentTransaksi.status === "dibatalkan") {
-                throw new ValidationError("Transaksi sudah dibatalkan sebelumnya");
+            if (!current) {
+                return NextResponse.json({ error: "Transaksi tidak ditemukan" }, { status: 404 });
+            }
+            if (current.status === "dibatalkan") {
+                return NextResponse.json({ error: "Transaksi sudah dibatalkan" }, { status: 400 });
             }
 
-            // Void transaction atomically
-            const result = await voidTransactionAtomic(id, storeId, body.alasan);
+            // Update status to cancelled
+            const { data, error } = await supabaseAdmin
+                .from("transaksi")
+                .update({
+                    status: "dibatalkan",
+                    catatan: body.alasan ? `[BATAL] ${body.alasan}` : "[BATAL]",
+                    updated_at: new Date().toISOString(),
+                })
+                .eq("id", id)
+                .eq("store_id", storeId)
+                .select()
+                .single();
 
-            // Invalidate caches
-            await CacheInvalidation.transaction(storeId, id);
+            if (error) {
+                return NextResponse.json({ error: error.message }, { status: 400 });
+            }
 
-            // Log audit trail
-            const metadata = extractRequestMetadata(req);
-            await AuditService.logVoid(
-                AuditTables.TRANSAKSI,
-                id,
-                {
-                    invoice_no: currentTransaksi.nomor,
-                    grand_total: currentTransaksi.grand_total,
-                    status: currentTransaksi.status,
-                },
-                body.alasan
-            );
+            // Restore stock for voided transaction items
+            const { data: items } = await supabaseAdmin
+                .from("transaksi_item")
+                .select("produk_id, jumlah")
+                .eq("transaksi_id", id);
 
-            return successResponse({
-                id: result.transaksi_id,
-                nomor: result.invoice_no,
+            if (items) {
+                for (const item of items) {
+                    const { data: prod } = await supabaseAdmin
+                        .from("produk")
+                        .select("stok")
+                        .eq("id", item.produk_id)
+                        .single();
+
+                    if (prod) {
+                        await supabaseAdmin
+                            .from("produk")
+                            .update({ stok: prod.stok + item.jumlah })
+                            .eq("id", item.produk_id);
+                    }
+                }
+            }
+
+            return NextResponse.json({
+                id: data.id,
+                nomor: data.nomor,
                 status: "dibatalkan",
             });
         }
 
-        throw new ValidationError("Hanya pembatalan transaksi yang diizinkan");
+        return NextResponse.json({ error: "Hanya pembatalan yang diizinkan" }, { status: 400 });
     })(req, context);
 }
 
 /**
- * DELETE /api/transaksi/[id] - Void transaction (alias for PATCH with status=dibatalkan)
+ * DELETE /api/transaksi/[id] - Void transaction (alias)
  */
 export async function DELETE(
     req: NextRequest,
     context: { params: Promise<Params> }
 ) {
-    return apiRouteWithParams(async (req, params) => {
-        // Check rate limit
-        const rateLimitResponse = await checkRateLimit(req);
-        if (rateLimitResponse) return rateLimitResponse;
-
-        const storeId = await getStoreId();
-        const { id } = params;
-
-        // Get current transaction for audit log
-        const currentTransaksi = await getTransaksiById(id, storeId);
-
-        if (currentTransaksi.status === "dibatalkan") {
-            throw new ValidationError("Transaksi sudah dibatalkan sebelumnya");
-        }
-
-        // Void transaction atomically
-        const result = await voidTransactionAtomic(id, storeId);
-
-        // Invalidate caches
-        await CacheInvalidation.transaction(storeId, id);
-
-        // Log audit trail
-        await AuditService.logVoid(
-            AuditTables.TRANSAKSI,
-            id,
-            {
-                invoice_no: currentTransaksi.nomor,
-                grand_total: currentTransaksi.grand_total,
-                status: currentTransaksi.status,
-            }
-        );
-
-        return successResponse({
-            id: result.transaksi_id,
-            nomor: result.invoice_no,
-            status: "dibatalkan",
-        });
-    })(req, context);
+    // Delegate to PATCH with status=dibatalkan
+    const patchReq = new NextRequest(req.url, {
+        method: "PATCH",
+        headers: req.headers,
+        body: JSON.stringify({ status: "dibatalkan" }),
+    });
+    return PATCH(patchReq, context);
 }
